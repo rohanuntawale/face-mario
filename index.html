@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Face Mario — put your face in the game!</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #111; height: 100%;
+    overflow: hidden; touch-action: none;
+    display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #game {
+    display: block;
+    image-rendering: pixelated;
+    width: min(100vw, 133.33vh);
+    aspect-ratio: 4 / 3;
+  }
+  /* Simple on-screen touch buttons (visible only on coarse pointers) */
+  #touch {
+    position: fixed; inset: auto 0 0 0; display: none;
+    justify-content: space-between; padding: 0 4vw 5vh; pointer-events: none;
+  }
+  @media (pointer: coarse) { #touch { display: flex; } }
+  #touch .grp { display: flex; gap: 3vw; pointer-events: auto; }
+  #touch button {
+    width: 17vw; max-width: 90px; height: 17vw; max-height: 90px;
+    border-radius: 50%; border: 2px solid #ffffff55;
+    background: #ffffff22; color: #fff; font-size: 26px;
+    backdrop-filter: blur(2px); user-select: none; -webkit-user-select: none;
+  }
+  #touch button:active { background: #ffffff55; }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="720"></canvas>
+
+<div id="touch">
+  <div class="grp">
+    <button id="btnL">◀</button>
+    <button id="btnR">▶</button>
+  </div>
+  <div class="grp">
+    <button id="btnRun">B</button>
+    <button id="btnJ">A</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ============================================================
+   FACE MARIO — a tiny Mario-style platformer
+   The player sprite is YOUR image: drop a file named face.png
+   (or face.svg / face.jpg / face.gif / face.webp) next to this
+   file and reload. A built-in smiley is used until you do.
+   ============================================================ */
+
+const W = 960, H = 720, TILE = 40;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+/* ------------------------- input ------------------------- */
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+  if (e.code === 'KeyR') resetLevel();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+
+function bindBtn(id, code) {
+  const el = document.getElementById(id);
+  const on  = e => { e.preventDefault(); keys[code] = true; };
+  const off = e => { e.preventDefault(); keys[code] = false; };
+  el.addEventListener('pointerdown', on);
+  el.addEventListener('pointerup', off);
+  el.addEventListener('pointerleave', off);
+  el.addEventListener('pointercancel', off);
+}
+bindBtn('btnL','ArrowLeft'); bindBtn('btnR','ArrowRight');
+bindBtn('btnJ','Space');     bindBtn('btnRun','ShiftLeft');
+
+/* --------------------- player image ---------------------- */
+/* Drop your own face.png / face.svg / face.jpg / face.gif / face.webp
+   next to index.html — it will be used automatically. */
+const FACE_FILES = ['face.png','face.svg','face.jpg','face.jpeg','face.gif','face.webp'];
+const playerImg = new Image();
+let playerImgReady = false;
+
+function tryLoadFace(i) {
+  if (i >= FACE_FILES.length) return;
+  playerImg.onload = () => { playerImgReady = true; };
+  playerImg.onerror = () => tryLoadFace(i + 1);
+  playerImg.src = FACE_FILES[i];
+}
+tryLoadFace(0);
+
+/* Built-in fallback: a little smiley, drawn once to an offscreen canvas */
+const fallbackFace = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffd94a'; g.beginPath(); g.arc(32,32,30,0,Math.PI*2); g.fill();
+  g.strokeStyle = '#8a5a00'; g.lineWidth = 3;
+  g.beginPath(); g.arc(32,32,30,0,Math.PI*2); g.stroke();
+  g.fillStyle = '#8a5a00';
+  g.beginPath(); g.arc(22,26,4,0,Math.PI*2); g.fill();
+  g.beginPath(); g.arc(42,26,4,0,Math.PI*2); g.fill();
+  g.beginPath(); g.arc(32,34,16,0.15*Math.PI,0.85*Math.PI); g.stroke();
+  return c;
+})();
+
+/* ------------------------ level -------------------------- */
+/* The level is built from simple helper calls — easy to read & modify.
+   Legend:  X solid   B brick   ? coin-block   C coin   P pipe
+            G goomba   F flag    . empty
+   World: 18 rows tall (ground = rows 16-17), 252 cols wide.
+   Gaps between ground() calls are bottomless pits!               */
+const ROWS = 18, COLS = 252;
+
+function buildGrid() {
+  const g = Array.from({ length: ROWS }, () => Array(COLS).fill('.'));
+  const put    = (x, y, ch) => { if (x >= 0 && x < COLS && y >= 0 && y < ROWS) g[y][x] = ch; };
+  const ground = (x0, x1)    => { for (let x = x0; x <= x1; x++) { put(x, 16, 'X'); put(x, 17, 'X'); } };
+  const plat   = (x0, x1, y) => { for (let x = x0; x <= x1; x++) put(x, y, 'X'); };
+  const coins  = (x0, x1, y) => { for (let x = x0; x <= x1; x++) put(x, y, 'C'); };
+  const row    = (x0, y, s)  => { [...s].forEach((ch, i) => { if (ch !== '.') put(x0 + i, y, ch); }); };
+  const pipe   = (x, topRow) => { for (let y = topRow; y <= 15; y++) { put(x, y, 'P'); put(x + 1, y, 'P'); } };
+  const stair  = (x0, h)     => { for (let i = 0; i < h; i++) for (let y = 15; y > 15 - 1 - i; y--) put(x0 + i, y, 'X'); };
+  const goomba = x => put(x, 15, 'G');
+  const flag   = x => { for (let y = 10; y <= 15; y++) put(x, y, 'F'); };
+
+  /* ground segments — gaps between them are deadly pits */
+  ground(0, 17); ground(21, 54); ground(58, 89); ground(93, 129); ground(133, 175); ground(179, 251);
+
+  /* coins floating over the pits (grab them mid-jump!) */
+  coins(17, 21, 13); coins(55, 57, 13); coins(90, 92, 13); coins(130, 132, 13); coins(176, 178, 13);
+
+  /* pipes */
+  pipe(30, 14); pipe(80, 13); pipe(128, 14); pipe(172, 14);
+
+  /* floating platforms + coins above them */
+  plat(66, 69, 13);   coins(66, 69, 11);
+  plat(73, 76, 11);   coins(73, 76, 9);
+  plat(98, 101, 13);  coins(98, 101, 11);
+  plat(105, 108, 11); coins(105, 108, 9);
+  plat(138, 141, 13); coins(138, 141, 11);
+  plat(145, 148, 11); coins(145, 148, 9);
+
+  /* brick & ?-block formations (bump them from below) */
+  row(62, 12, '?B?B');  coins(62, 65, 11);
+  row(114, 12, 'B?BB?B');
+  row(154, 12, '?BB?');
+  row(186, 12, 'B?B?B');
+
+  /* scenery coins */
+  coins(8, 10, 13); coins(238, 242, 13);
+
+  /* enemies */
+  [12, 26, 40, 68, 86, 102, 118, 152, 162, 170, 192, 204, 214, 234, 246].forEach(goomba);
+
+  /* the finish: staircase then flagpole */
+  stair(222, 8);
+  flag(236);
+
+  return g.map(r => r.join(''));
+}
+const LEVEL = buildGrid();
+
+let grid = [];   // grid[y][x] = char
+function loadLevel() {
+  grid = LEVEL.map(r => {
+    const a = r.split('');
+    while (a.length < COLS) a.push('.');   // tolerate uneven hand-written rows
+    return a.slice(0, COLS);
+  });
+  coins.length = 0; goombas.length = 0; bumps.length = 0;
+  flagX = 0;
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const ch = grid[y][x];
+    if (ch === 'C') { coins.push({ x: x*TILE + TILE/2, y: y*TILE + TILE/2, taken: false }); grid[y][x] = '.'; }
+    if (ch === 'G') { goombas.push(makeGoomba(x*TILE, y*TILE)); grid[y][x] = '.'; }
+    if (ch === 'F') { flagX = x*TILE; grid[y][x] = '.'; }
+  }
+}
+
+/* ----------------------- entities ------------------------ */
+const player = { x: 80, y: 0, w: 34, h: 44, vx: 0, vy: 0, onGround: false, face: 1, squash: 1, dead: false, deadT: 0 };
+const GRAV = 2200, MOVE_ACC = 2600, RUN_MAX = 380, WALK_MAX = 210, FRICTION = 1900, AIR_ACC = 1800;
+const JUMP_V = -760, JUMP_CUT = 0.45, COYOTE = 0.09, JUMP_BUF = 0.12;
+let coyote = 0, jumpBuf = 0, jumpHeld = false;
+
+const coins = [], goombas = [], bumps = [];
+let flagX = 0;
+let camX = 0, score = 0, lives = 3, state = 'play'; // play | dead | win
+let stateT = 0;
+
+function makeGoomba(x, y) {
+  // sits exactly on the tile below (ground top = y + TILE), with gravity state
+  return { x, y: y + TILE - 34, w: 36, h: 34, vy: 0, vx: -60, alive: true, squashT: 0, animT: 0 };
+}
+
+function resetLevel() {
+  loadLevel();
+  player.x = 80; player.y = 10*TILE; player.vx = 0; player.vy = 0;
+  player.dead = false; player.deadT = 0; player.squash = 1;
+  camX = 0; state = 'play'; stateT = 0;
+  // keep score across deaths, but restore collected coins is simpler: coins reset
+}
+
+function tilesIn(y0, y1, x, w) { // solid tiles overlapping rows y0..y1, columns x..x+w
+  const out = [];
+  const x0 = Math.floor(x / TILE), x1 = Math.floor((x + w - 1) / TILE);
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
+    if (tx < 0 || tx >= COLS) { out.push({x: tx, y: ty, ch: 'X'}); continue; } // side walls
+    if (ty < 0 || ty >= ROWS) continue; // open sky above, bottomless pits below
+    const ch = grid[ty][tx];
+    if (ch === 'X' || ch === 'B' || ch === '?' || ch === 'b' || ch === 'P') out.push({x: tx, y: ty, ch});
+  }
+  return out;
+}
+/* Walls (horizontal movement): shrink 1px at top/bottom so the row an entity
+   RESTS on is never mistaken for a wall. Floors/ceilings (vertical movement):
+   include the exact bottom edge so entities register as grounded every frame. */
+const wallsInRect  = (x, y, w, h) => tilesIn(Math.floor((y + 1) / TILE), Math.floor((y + h - 1) / TILE), x, w);
+const floorsInRect = (x, y, w, h) => tilesIn(Math.floor(y / TILE), Math.floor((y + h) / TILE), x, w);
+
+function die() {
+  if (state !== 'play') return;
+  state = 'dead'; stateT = 0; lives--;
+  player.vy = -700; player.dead = true;
+}
+
+/* ------------------------ update ------------------------- */
+function update(dt) {
+  stateT += dt;
+
+  if (state === 'dead') {
+    player.vy += GRAV * dt; player.y += player.vy * dt;
+    if (stateT > 1.6) {
+      if (lives <= 0) { score = 0; lives = 3; }
+      resetLevel();
+    }
+    return;
+  }
+  if (state === 'win') {
+    if (stateT > 3) resetLevel();
+    return;
+  }
+
+  /* ---- horizontal movement ---- */
+  const left  = keys['ArrowLeft'] || keys['KeyA'];
+  const right = keys['ArrowRight'] || keys['KeyD'];
+  const run   = keys['ShiftLeft'] || keys['ShiftRight'] || keys['KeyX'];
+  const maxV  = run ? RUN_MAX : WALK_MAX;
+  const acc   = player.onGround ? MOVE_ACC : AIR_ACC;
+
+  if (left && !right)  { player.vx -= acc * dt; player.face = -1; }
+  if (right && !left)  { player.vx += acc * dt; player.face = 1; }
+  if (!left && !right && player.onGround) {
+    const s = Math.sign(player.vx);
+    player.vx -= s * FRICTION * dt;
+    if (Math.sign(player.vx) !== s) player.vx = 0;
+  }
+  player.vx = Math.max(-maxV, Math.min(maxV, player.vx));
+
+  /* ---- jump ---- */
+  if (player.onGround) coyote = COYOTE; else coyote -= dt;
+  if (keys['Space'] || keys['ArrowUp'] || keys['KeyW'] || keys['KeyZ']) {
+    if (!jumpHeld) jumpBuf = JUMP_BUF;
+    jumpHeld = true;
+  } else { jumpHeld = false; }
+  jumpBuf -= dt;
+
+  if (jumpBuf > 0 && coyote > 0) {
+    player.vy = JUMP_V; player.onGround = false;
+    coyote = 0; jumpBuf = 0; player.squash = 1.25;
+  }
+  // variable jump height: release early = shorter jump
+  if (!jumpHeld && player.vy < 0) player.vy += JUMP_CUT * GRAV * dt;
+
+  /* ---- gravity ---- */
+  player.vy += GRAV * dt;
+  if (player.vy > 1100) player.vy = 1100;
+
+  /* ---- move + collide, axis by axis ---- */
+  player.x += player.vx * dt;
+  let hits = wallsInRect(player.x, player.y, player.w, player.h);
+  for (const h of hits) {
+    if (player.vx > 0) player.x = h.x*TILE - player.w; else if (player.vx < 0) player.x = (h.x+1)*TILE;
+    player.vx = 0;
+  }
+  if (player.x < 0) { player.x = 0; player.vx = 0; }
+  if (player.x > COLS*TILE - player.w) player.x = COLS*TILE - player.w;
+
+  const wasOnGround = player.onGround;
+  player.onGround = false;
+  player.y += player.vy * dt;
+  hits = floorsInRect(player.x, player.y, player.w, player.h);
+  for (const h of hits) {
+    if (player.vy > 0) {
+      player.y = h.y*TILE - player.h; player.onGround = true; player.vy = 0;
+    } else if (player.vy < 0) {
+      player.y = (h.y+1)*TILE; player.vy = 0;
+      bumpBlock(h.x, h.y);
+    }
+  }
+  if (player.onGround && !wasOnGround) player.squash = 0.75;
+  player.squash += (1 - player.squash) * Math.min(1, dt*12);
+
+  /* ---- fell in a pit ---- */
+  if (player.y > ROWS*TILE + 100) die();
+
+  /* ---- coin blocks bump animation ---- */
+  for (let i = bumps.length - 1; i >= 0; i--) {
+    bumps[i].t += dt;
+    if (bumps[i].t > 0.22) bumps.splice(i, 1);
+  }
+
+  /* ---- coins ---- */
+  for (const c of coins) {
+    if (c.taken) continue;
+    const dx = c.x - (player.x + player.w/2), dy = c.y - (player.y + player.h/2);
+    if (dx*dx + dy*dy < 30*30) { c.taken = true; score++; }
+  }
+
+  /* ---- goombas ---- */
+  for (const g of goombas) {
+    if (!g.alive) { g.squashT += dt; continue; }
+    g.animT += dt;
+    // turn around at ledges (only while standing still on ground)
+    if (g.vy === 0) {
+      const footTy = Math.floor((g.y + g.h + 2) / TILE);
+      const aheadX = g.vx > 0 ? g.x + g.w + 2 : g.x - 2;
+      if (tilesIn(footTy, footTy, aheadX, 1).length === 0) g.vx *= -1;
+    }
+    g.vy += GRAV * dt; if (g.vy > 1100) g.vy = 1100;
+    g.x += g.vx * dt;
+    let gh = wallsInRect(g.x, g.y, g.w, g.h);
+    if (gh.length > 0) {
+      const h = gh[0];
+      if (g.vx > 0) g.x = h.x*TILE - g.w; else if (g.vx < 0) g.x = (h.x+1)*TILE;
+      g.vx *= -1;
+    }
+    g.y += g.vy * dt;
+    gh = floorsInRect(g.x, g.y, g.w, g.h);
+    for (const h of gh) {
+      if (g.vy > 0) { g.y = h.y*TILE - g.h; g.vy = 0; }
+      else if (g.vy < 0) { g.y = (h.y+1)*TILE; g.vy = 0; }
+    }
+    if (g.y > ROWS*TILE + 100) g.alive = false;
+
+    // vs player
+    if (player.x < g.x + g.w && player.x + player.w > g.x &&
+        player.y < g.y + g.h && player.y + player.h > g.y) {
+      const stomping = player.vy > 120 && (player.y + player.h) - g.y < 24;
+      if (stomping) {
+        g.alive = false; g.squashT = 0;
+        player.vy = keys['Space'] ? -640 : -420; // bounce higher if jump held
+        player.squash = 1.2;
+      } else {
+        die();
+      }
+    }
+  }
+
+  /* ---- flag (win) ---- */
+  if (flagX && player.x + player.w > flagX + 10) {
+    state = 'win'; stateT = 0;
+    player.vx = 120;
+  }
+
+  /* ---- camera ---- */
+  const target = player.x + player.w/2 - W*0.42;
+  camX += (Math.max(0, target) - camX) * Math.min(1, dt*8);
+  const maxCam = COLS*TILE - W;
+  if (camX > maxCam) camX = maxCam;
+  if (camX < 0) camX = 0;
+}
+
+function bumpBlock(x, y) {
+  const ch = grid[y][x];
+  if (ch === '?') {
+    grid[y][x] = 'b'; // used block
+    // spawn a coin pop
+    bumps.push({ x, y, t: 0, coin: true });
+    score++;
+  } else if (ch === 'B') {
+    bumps.push({ x, y, t: 0, coin: false });
+  }
+}
+
+/* ------------------------ render ------------------------- */
+let coinAnim = 0;
+
+function draw() {
+  coinAnim += 0.016;
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, H);
+  sky.addColorStop(0, '#5c94fc'); sky.addColorStop(1, '#9bd0ff');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  // clouds (parallax)
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (let i = 0; i < 8; i++) {
+    const cx = ((i*397 + 60) - camX*0.3) % (W+300) - 150;
+    const cy = 40 + (i*53) % 140;
+    cloud(cx, cy, 1 + (i%3)*0.4);
+  }
+  // hills (parallax)
+  ctx.fillStyle = '#3ba53b';
+  for (let i = 0; i < 6; i++) {
+    const hx = ((i*613 + 120) - camX*0.5) % (W+500) - 200;
+    hill(hx, H-110, 90 + (i%2)*50);
+  }
+
+  ctx.save();
+  ctx.translate(-Math.round(camX), 0);
+
+  /* tiles */
+  const x0 = Math.max(0, Math.floor(camX/TILE) - 1);
+  const x1 = Math.min(COLS-1, Math.ceil((camX+W)/TILE) + 1);
+  for (let y = 0; y < ROWS; y++) for (let x = x0; x <= x1; x++) {
+    const ch = grid[y][x];
+    if (ch === '.') continue;
+    const px = x*TILE, py = y*TILE;
+    const bump = bumps.find(b => b.x === x && b.y === y);
+    const off = bump ? -Math.sin(bump.t/0.22 * Math.PI) * 10 : 0;
+    if (ch === 'X') ground(px, py);
+    else if (ch === 'B') brick(px, py, off);
+    else if (ch === '?') qblock(px, py, off, false);
+    else if (ch === 'b') qblock(px, py, off, true);
+    else if (ch === 'P') pipeTile(px, py, x, y);
+  }
+
+  /* coin pops from ? blocks */
+  for (const b of bumps) if (b.coin) {
+    const p = b.t / 0.22;
+    coin(b.x*TILE + TILE/2, b.y*TILE - 20 - p*60, 1 - p*0.4);
+  }
+
+  /* coins */
+  for (const c of coins) if (!c.taken) coin(c.x, c.y + Math.sin(coinAnim*3 + c.x)*3, 1);
+
+  /* flag */
+  if (flagX) {
+    const fx = flagX + 12;
+    ctx.fillStyle = '#c8c8c8'; ctx.fillRect(fx, 3*TILE, 6, 13*TILE);
+    ctx.fillStyle = '#e13b3b';
+    const wave = Math.sin(coinAnim*4)*4;
+    ctx.beginPath();
+    ctx.moveTo(fx+6, 3*TILE+6);
+    ctx.lineTo(fx+70+wave, 3*TILE+22);
+    ctx.lineTo(fx+6, 3*TILE+44);
+    ctx.closePath(); ctx.fill();
+  }
+
+  /* goombas */
+  for (const g of goombas) {
+    if (!g.alive && g.squashT > 0.5) continue;
+    goomba(g);
+  }
+
+  /* player */
+  drawPlayer();
+
+  ctx.restore();
+
+  /* HUD */
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(12, 12, 300, 64);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 26px system-ui, sans-serif';
+  ctx.fillText('🪙 ' + score, 28, 46);
+  ctx.fillText('❤️ ' + Math.max(0, lives), 140, 46);
+  ctx.font = '16px system-ui, sans-serif';
+  ctx.fillStyle = '#ffe98a';
+  ctx.fillText('← → move · Space jump · Shift run · R restart', 28, 70);
+
+  if (state === 'win') {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.font = 'bold 64px system-ui, sans-serif';
+    ctx.fillText('🏁 LEVEL CLEAR!', W/2, H/2 - 20);
+    ctx.font = '30px system-ui, sans-serif';
+    ctx.fillText('Coins: ' + score, W/2, H/2 + 40);
+    ctx.textAlign = 'left';
+  }
+  if (lives <= 0 && state === 'dead') {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.font = 'bold 56px system-ui, sans-serif';
+    ctx.fillText('GAME OVER — restarting…', W/2, H/2);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawPlayer() {
+  const img = playerImgReady ? playerImg : fallbackFace;
+  const walkCycle = player.onGround && Math.abs(player.vx) > 20
+    ? Math.sin(performance.now()/70) * 0.12 : 0;
+  const sq = player.squash;
+  const w = player.w / sq, h = player.h * sq; // squash & stretch
+  const cx = player.x + player.w/2, by = player.y + player.h;
+
+  ctx.save();
+  ctx.translate(cx, by);
+  ctx.rotate(walkCycle * (player.face));
+  ctx.scale(player.face, 1);
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(0, 2, w*0.45, 5, 0, 0, Math.PI*2); ctx.fill();
+  ctx.drawImage(img, -w/2, -h, w, h);
+  ctx.restore();
+}
+
+/* ------- little drawing helpers (chunky, Mario-ish) ------- */
+function ground(px, py) {
+  ctx.fillStyle = '#c96a1f'; ctx.fillRect(px, py, TILE, TILE);
+  ctx.fillStyle = '#e8934a'; ctx.fillRect(px, py, TILE, 6);
+  ctx.strokeStyle = '#8a4410'; ctx.lineWidth = 2;
+  ctx.strokeRect(px+1, py+1, TILE-2, TILE-2);
+  ctx.fillStyle = '#8a4410';
+  ctx.fillRect(px+TILE/2-1, py+6, 2, TILE-8);
+  ctx.fillRect(px+2, py+TILE/2, TILE-4, 2);
+}
+function brick(px, py, off) {
+  ctx.fillStyle = '#b6520f'; ctx.fillRect(px, py+off, TILE, TILE);
+  ctx.fillStyle = '#d8752c'; ctx.fillRect(px, py+off, TILE, 5);
+  ctx.strokeStyle = '#5f2a08'; ctx.lineWidth = 2;
+  ctx.strokeRect(px+1, py+off+1, TILE-2, TILE-2);
+  ctx.beginPath();
+  ctx.moveTo(px, py+off+TILE/2); ctx.lineTo(px+TILE, py+off+TILE/2);
+  ctx.moveTo(px+TILE/2, py+off+TILE/2); ctx.lineTo(px+TILE/2, py+off+TILE);
+  ctx.stroke();
+}
+function qblock(px, py, off, used) {
+  ctx.fillStyle = used ? '#9a6a2f' : '#eaa420'; ctx.fillRect(px, py+off, TILE, TILE);
+  ctx.fillStyle = used ? '#b5854a' : '#ffd25e'; ctx.fillRect(px+2, py+off+2, TILE-4, 6);
+  ctx.strokeStyle = '#7a4a00'; ctx.lineWidth = 2;
+  ctx.strokeRect(px+1, py+off+1, TILE-2, TILE-2);
+  if (!used) {
+    ctx.fillStyle = '#7a4a00';
+    ctx.font = 'bold 24px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText('?', px+TILE/2, py+off+29); ctx.textAlign = 'left';
+    ctx.fillStyle = '#fff8d0';
+    ctx.fillRect(px+5, py+off+5, 3, 3); ctx.fillRect(px+TILE-8, py+off+TILE-8, 3, 3);
+  }
+}
+function pipeTile(px, py, x, y) {
+  const top = y === 0 || grid[y-1][x] !== 'P';
+  const left = x === 0 || grid[y][x-1] !== 'P';
+  ctx.fillStyle = '#2fa32f';
+  if (top) {
+    ctx.fillRect(px - (left?0:0), py, TILE, TILE);
+    ctx.fillStyle = '#7fe07f'; ctx.fillRect(px, py+2, TILE, 5);
+    ctx.strokeStyle = '#0d5c0d'; ctx.lineWidth = 2;
+    if (left) { ctx.strokeRect(px+1, py+1, TILE, TILE-2); }
+    else { ctx.strokeRect(px, py+1, TILE-1, TILE-2); }
+  } else {
+    ctx.fillStyle = '#2fa32f'; ctx.fillRect(px + (left?4:-4), py, TILE, TILE);
+    ctx.strokeStyle = '#0d5c0d'; ctx.lineWidth = 2;
+    ctx.strokeRect(px + (left?5:-3), py, TILE-2, TILE);
+    ctx.fillStyle = '#7fe07f';
+    ctx.fillRect(px + (left?7:0), py, 4, TILE);
+  }
+}
+function coin(x, y, s) {
+  const w = Math.abs(Math.cos(coinAnim*4)) * 14 + 4;
+  ctx.fillStyle = '#ffd700';
+  ctx.beginPath(); ctx.ellipse(x, y, w*s, 16*s, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#b8860b';
+  ctx.beginPath(); ctx.ellipse(x, y, w*s*0.55, 10*s, 0, 0, Math.PI*2); ctx.fill();
+}
+function goomba(g) {
+  const px = g.x, py = g.y;
+  ctx.save();
+  if (!g.alive) { // squashed
+    ctx.fillStyle = '#8b4513';
+    ctx.beginPath(); ctx.ellipse(px+g.w/2, py+g.h-6, g.w/2, 8, 0, 0, Math.PI*2); ctx.fill();
+    ctx.restore(); return;
+  }
+  const wob = Math.sin(g.animT*8) * 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(px+g.w/2, py+g.h, g.w*0.4, 4, 0, 0, Math.PI*2); ctx.fill();
+  // feet
+  ctx.fillStyle = '#3d2314';
+  ctx.fillRect(px+3, py+g.h-8+wob, 12, 8);
+  ctx.fillRect(px+g.w-15, py+g.h-8-wob, 12, 8);
+  // body
+  ctx.fillStyle = '#8b4513';
+  ctx.beginPath();
+  ctx.ellipse(px+g.w/2, py+g.h/2, g.w/2, g.h/2 - 2, 0, Math.PI, 0);
+  ctx.fill();
+  ctx.fillRect(px, py+g.h/2-2, g.w, g.h/2);
+  // face
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.ellipse(px+g.w*0.32, py+g.h*0.4, 7, 8, 0, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(px+g.w*0.68, py+g.h*0.4, 7, 8, 0, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000';
+  const look = Math.sign(g.vx);
+  ctx.beginPath(); ctx.arc(px+g.w*0.32 + look*2, py+g.h*0.42, 3, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+g.w*0.68 + look*2, py+g.h*0.42, 3, 0, Math.PI*2); ctx.fill();
+  // angry brows
+  ctx.strokeStyle = '#000'; ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(px+g.w*0.2, py+g.h*0.22); ctx.lineTo(px+g.w*0.42, py+g.h*0.3);
+  ctx.moveTo(px+g.w*0.8, py+g.h*0.22); ctx.lineTo(px+g.w*0.58, py+g.h*0.3);
+  ctx.stroke();
+  ctx.restore();
+}
+function cloud(x, y, s) {
+  ctx.beginPath();
+  ctx.arc(x, y, 18*s, 0, Math.PI*2);
+  ctx.arc(x+22*s, y-8*s, 22*s, 0, Math.PI*2);
+  ctx.arc(x+48*s, y, 18*s, 0, Math.PI*2);
+  ctx.fill();
+}
+function hill(x, baseY, r) {
+  ctx.beginPath();
+  ctx.arc(x, baseY, r, Math.PI, 0);
+  ctx.fill();
+}
+
+/* ------------------------ loop --------------------------- */
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+loadLevel();
+player.y = 10*TILE;
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
