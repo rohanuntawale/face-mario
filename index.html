@@ -444,6 +444,54 @@ let timeLeft = 0, timeBonus = 0, timeBonusAcc = 0, drainSfxT = 0, hurryWarned = 
 let hi = parseInt(localStorage.getItem('faceMarioHi') || '0', 10) || 0;
 let levelClock = 0, lastClearResult = null; // per-level stopwatch + result of the last flag
 
+/* ---------------------- the narrator (comedy engine) ---------------------- */
+/* Floating speech captions that react to what just happened to YOU. One pool
+   per trigger, max one caption on screen per trigger type, small cooldown. */
+const SNARK = {
+  blastEscape: ["that was CLOSE", "singey.", "the bomb respected you", "close one!", "you're dust-tough"],
+  bossHurt:    ["That's CROWN property!", "insolence!", "I'm a BOMB. IIS you who fears ME. Probably.", "OW. Cease. At once."],
+  bossLow:     ["I'm a bomb, I don't fear death... wait.", "this changes NOTHING", "tell my fuse I loved her"],
+  bossSpawn:   ["ANOTHER face for my collection.", "you dare enter MY keep?", "cute. tiny. flammable."],
+  bombSelf:    ["WHO lit that?", "cooking with gas, huh", "self-service 💥", "you FUSED it. you."],
+  pitDeath:    ["the pit remembers you.", "gravity: undefeated", "one more for the gap", "down. again.", "tiles: 294 · voids: you"],
+  bombDeath:   ["they had a FUSE, you know", "still holding it, huh", "boom-owned"],
+  goombaDeath: ["a goomba did THAT?", "walked right into it", "little guy, big impact"],
+  chain:       ["dominoes!", "chain REACTION", "they told their friends", "social bombing"],
+  clutched:    ["CLUTCH", "that was_style_", "framed it"],
+  tooClose:    ["personal space!!", "EXCUSE me", "do you MIND"],
+};
+let captions = [];          // on-screen floating lines
+let lastCaptionT = {};      // per-trigger cooldown clocks
+let deathsBy = { pit: 0, bomb: 0, goomba: 0, other: 0 }; // fatality report card
+function say(trigger, wx, wy, force) {
+  if (state !== 'play' && !force) return;   // force: for spawn/banner moments (level build runs pre-play)
+  const now = levelClock;
+  if (lastCaptionT[trigger] && now - lastCaptionT[trigger] < 2.5) return;
+  if (captions.length >= 3) return;               // don't drown the screen
+  const pool = SNARK[trigger];
+  if (!pool) return;
+  lastCaptionT[trigger] = now;
+  captions.push({ text: pool[(Math.random() * pool.length) | 0], x: wx, y: wy, t: 0, life: 1.5 });
+}
+function updateCaptions(dt) {
+  for (const c of captions) { c.t += dt; c.y -= 22 * dt; }
+  captions = captions.filter(c => c.t < c.life);
+}
+function drawCaptions() {
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 17px system-ui, sans-serif';
+  for (const c of captions) {
+    const a = c.t < 0.15 ? c.t / 0.15 : Math.max(0, 1 - (c.t - 1.0) / 0.5);
+    ctx.globalAlpha = Math.min(1, a) * 0.95;
+    const w = ctx.measureText(c.text).width;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';                    // backing pill for readability
+    ctx.fillRect(c.x - w/2 - 8, c.y - 15, w + 16, 22);
+    ctx.fillStyle = '#fffbe8';
+    ctx.fillText(c.text, c.x, c.y);
+  }
+  ctx.globalAlpha = 1; ctx.textAlign = 'left';
+}
+
 /* --------------- save file: best score · best times · progress --------------- */
 const SAVE_KEY = 'faceMarioSave1';
 function defaultSave() { return { bestScore: 0, bestTimes: {}, cleared: {}, allCleared: false }; }
@@ -506,7 +554,7 @@ function logBomb(ev) {
 function makeBoss(cx) {
   return {
     x: cx, y: 16*TILE - 76, w: 72, h: 76, vx: 0, vy: 0, onGround: false,
-    hp: 6, maxHp: 6, face: -1, animT: 0, hitFlash: 0, invuln: 0,
+    hp: 6, maxHp: 6, face: -1, animT: 0,    hitFlash: 0, invuln: 0, barkT: 0, // trash-talk bubble clock
     hopT: 2.5, // countdown to next hop attack
     enraged: false, dying: false, dieT: 0, stun: 0
   };
@@ -516,6 +564,7 @@ function hurtBoss(n) {
   boss.hp -= n; boss.hitFlash = 0.35; // no hurt-window: every blast in a chain lands (only bombs can hurt him)
   sfx.stomp();
   spawnBurst(boss.x, boss.y + boss.h/2, ['#ff9d3b', '#ffd700', '#fff'], 16);
+  say(boss.hp <= 2 ? 'bossLow' : 'bossHurt', boss.x, boss.y - 14);
   if (boss.hp <= 0) {
     boss.dying = true; boss.dieT = 0; boss.vx = 0; boss.vy = -300;
     addScore(15);
@@ -603,6 +652,11 @@ function explodeBomb(b) {
       if (dx*dx + dy*dy < 110*110) goombasCaught++;
     }
     playerCaught = pd2 < 105*105;
+    if (playerCaught) {
+      // count the self-own + narrator knows
+      if (b.src === 'stomp' || b.src === 'fireball') deathsBy.bomb++; // player lit it themselves
+      say(b.src === 'stomp' || b.src === 'fireball' ? 'bombSelf' : 'tooClose', player.x + player.w/2, player.y - 12);
+    }
     if (boss && !boss.dying) {
       const dx = boss.x - b.x, dy = (boss.y + boss.h/2) - (b.y + b.h/2);
       bossCaught = dx*dx + dy*dy < 170*170;
@@ -624,7 +678,7 @@ function explodeBomb(b) {
   for (const o of bombs) { // CHAIN REACTION: stagger neighbors slightly for the domino beat
     if (o === b || !o.alive || o.lit) continue;
     const dx = o.x - b.x, dy = (o.y + o.h/2) - (b.y + b.h/2);
-    if (dx*dx + dy*dy < 130*130) { o.lit = true; o.fuse = 0.16 + Math.random() * 0.08; o.fuseMax = o.fuse; o.src = 'chain'; o.depth = b.depth + 1; o.vx = 0; } // jitter so dominoes don't sync (each beat > boss hurt-window)
+    if (dx*dx + dy*dy < 130*130) { o.lit = true; o.fuse = 0.16 + Math.random() * 0.08; o.fuseMax = o.fuse; o.src = 'chain'; o.depth = b.depth + 1; o.vx = 0; say('chain', o.x, o.y - 20); } // jitter so dominoes don't sync (each beat > boss hurt-window)
   }
   if (boss && !boss.dying && state === 'play') { // THE WARDEN fears only explosions (big target: 170px)
     const dx = boss.x - b.x, dy = (boss.y + boss.h/2) - (b.y + b.h/2);
@@ -643,9 +697,13 @@ function explodeBomb(b) {
   if (state === 'play' && player.invuln <= 0) {
     const dx = (player.x + player.w/2) - b.x, dy = (player.y + player.h/2) - (b.y + b.h/2);
     if (dx*dx + dy*dy < 105*105) {
+      if (player.power === 0) deathsBy.bomb++;   // the blast will kill, not shrink
       hurtPlayer();
       player.vx += Math.sign(dx || 1) * 260; // blast knockback
       player.vy = Math.min(player.vy, -300);
+    } else {
+      // blast-escape: you were inside the chain range but outside the hurt range
+      say('blastEscape', player.x + player.w/2, player.y - 12);
     }
   }
 }
@@ -654,6 +712,7 @@ function loadLevel() {
   const levelData = buildGrid();
   grid = levelData.map(row => row.split('')); // mutable char arrays (buildGrid returns joined strings)
   coins.length = 0; goombas.length = 0; bumps.length = 0; parts.length = 0; pickups.length = 0; fireballs.length = 0; bombs.length = 0;
+  captions.length = 0; lastCaptionT = {};          // fresh narrator per level
   boss = null;
   flagX = 0;
   for (let y = 0; y < ROWS; y++) {
@@ -664,7 +723,7 @@ function loadLevel() {
       else if (ch === 'M' || ch === 'W') { pickups.push({ x: x*TILE + TILE/2, y: y*TILE + TILE/2, kind: ch === 'M' ? 'm' : 'f', taken: false }); grid[y][x] = '.'; }
       else if (ch === 'O') { bombs.push(makeBobOmb(x*TILE + TILE/2, y*TILE)); grid[y][x] = '.'; }
       else if (ch === 'Q') { bombs.push(makeBobOmb(x*TILE + TILE/2, y*TILE, true)); grid[y][x] = '.'; } // Q = stationary arena bomb
-      else if (ch === 'K') { boss = makeBoss(x*TILE + TILE/2); bossWallL = Math.max(0, x - 14); bossWallR = Math.min(COLS - 1, x + 14); grid[y][x] = '.'; }
+      else if (ch === 'K') { boss = makeBoss(x*TILE + TILE/2); bossWallL = Math.max(0, x - 14); bossWallR = Math.min(COLS - 1, x + 14); grid[y][x] = '.'; say('bossSpawn', boss.x, boss.y - 14, true); boss.barkT = 5; }
       else if (ch === 'F') { flagX = x*TILE; }
     }
   }
@@ -677,6 +736,19 @@ function resetPlayer() {
   player.x = 80; player.y = 10*TILE; player.vx = 0; player.vy = 0;
   player.dead = false; player.deadT = 0; player.squash = 1; player.face = 1; player.invuln = 0;
   camX = 0; coyote = 0; jumpBuf = 0; jumpHeld = false; fireHeld = false; fireCd = 0;
+}
+
+/* ---- witness panic: goombas who see a friend get stomped HUFF IT (flee 3s) ---- */
+function panicWitnesses(deadGoomba) {
+  for (const g of goombas) {
+    if (!g.alive || g === deadGoomba) continue;
+    const dx = g.x - deadGoomba.x, dy = g.y - deadGoomba.y;
+    if (Math.abs(dx) < 340 && Math.abs(dy) < 140) {
+      g.panic = 3;                                      // seconds of pure fear
+      g.vx = 230 * Math.sign(dx || 1);                  // sprint AWAY
+      say('tooClose', g.x + g.w/2, g.y - 14);           // ('do you MIND')
+    }
+  }
 }
 
 function gotoIntro() {          // (re)start current level with banner
@@ -709,6 +781,7 @@ function die() {
   if (state !== 'play') return;
   state = 'dead'; stateT = 0; lives--;
   player.vy = -700; player.dead = true; player.droppedPower = true;
+  player.deathBy = 'other';                    // classified later: pit / bomb / goomba
   sfx.die();
 }
 
@@ -778,6 +851,7 @@ function update(dt) {
   if (state === 'title' || state === 'gameover' || state === 'ending' || state === 'bosswin') {
     if (state === 'bosswin' && parts.length < 60 && Math.random() < 0.18)
       spawnBurst(camX + W * (0.2 + Math.random() * 0.6), 100 + Math.random() * 250, FIREWORK_COLORS);
+    updateCaptions(dt);
     updateParticles(dt);
     return;
   }
@@ -791,8 +865,12 @@ function update(dt) {
 
   if (state === 'dead') {
     player.vy += GRAV * dt; player.y += player.vy * dt;
+    if (player.deathBy === 'other' && player.y > ROWS*TILE) player.deathBy = 'pit'; // fell past the bottom of the world
     if (stateT > 1.6) {
-      if (lives <= 0) { state = 'gameover'; stateT = 0; sfx.gameover(); }
+      if (lives <= 0) {
+        deathsBy[player.deathBy || 'other']++;
+        state = 'gameover'; stateT = 0; sfx.gameover();
+      }
       else gotoIntro();
     }
     return;
@@ -821,6 +899,7 @@ function update(dt) {
         if (rest > 0) { addScore(rest); timeBonus += rest; timeBonusAcc -= rest; }
       }
     }
+    updateCaptions(dt);
     updateParticles(dt);
     if (stateT > 4.6) { // extra second to read your time vs the record
       currentLevel++;
@@ -958,6 +1037,7 @@ function update(dt) {
         g.alive = false; g.squashT = 0;
         addScore(1); sfx.stomp();
         spawnBurst(g.x + g.w/2, g.y + g.h/2, ['#c9a06a', '#8b4513', '#ff9d3b'], 12);
+        panicWitnesses(g);           // even fireball kills scare the crowd
         dead = true; break;
       }
     }
@@ -1028,8 +1108,9 @@ function update(dt) {
   for (const g of goombas) {
     if (!g.alive) { g.squashT += dt; continue; }
     g.animT += dt;
-    // turn around at ledges (only while standing still on ground)
-    if (g.vy === 0) {
+    if (g.panic > 0) g.panic -= dt;               // witness fear wears off
+    // turn around at ledges (only while standing still on ground) — panicking goombas DON'T look down
+    if (g.vy === 0 && g.panic <= 0) {
       const footTy = Math.floor((g.y + g.h + 2) / TILE);
       const aheadX = g.vx > 0 ? g.x + g.w + 2 : g.x - 2;
       if (tilesIn(footTy, footTy, aheadX, 1).length === 0) g.vx *= -1;
@@ -1060,6 +1141,7 @@ function update(dt) {
         player.squash = 1.2;
         sfx.stomp();
         spawnBurst(g.x + g.w/2, g.y + g.h/2, ['#c9a06a', '#8b4513', '#fff'], 10);
+        panicWitnesses(g);           // the others SAW that
       } else {
         hurtPlayer(); // powered up? shrink instead of dying
       }
@@ -1163,6 +1245,7 @@ function update(dt) {
       });
     }
   }
+  updateCaptions(dt);
   updateParticles(dt);
 }
 
@@ -1338,6 +1421,7 @@ function draw() {
   }
   ctx.globalAlpha = 1;
 
+
   /* goombas */
   for (const g of goombas) {
     if (!g.alive && g.squashT > 0.5) continue;
@@ -1352,6 +1436,9 @@ function draw() {
 
   /* player */
   drawPlayer();
+
+  /* narrator captions + boss bark (world space, above everything) */
+  drawCaptions();
 
   ctx.restore();
 
@@ -1452,9 +1539,28 @@ function draw() {
       ctx.fillStyle = '#ffd700';
       ctx.fillText('★ NEW HIGH SCORE! ★', W/2, H/2 + 25);
     }
+
+    /* ---- fatality report card: the run, told honestly ---- */
+    {
+      const total = deathsBy.pit + deathsBy.bomb + deathsBy.goomba + deathsBy.other;
+      if (total > 0) {
+        ctx.font = '20px system-ui, sans-serif';
+        ctx.fillStyle = '#f4c7c7';
+        const y0 = (score >= hi && score > 0) ? H/2 + 62 : H/2 + 42;   // sits above the buttons (now at +150)
+        ctx.fillText('— how it happened —', W/2, y0);
+        ctx.font = '17px system-ui, sans-serif';
+        ctx.fillStyle = '#e8e8e8';
+        let rows = [];
+        if (deathsBy.pit)   rows.push(`🕳️ pits: ${deathsBy.pit}`);
+        if (deathsBy.bomb)  rows.push(`💥 own explosives: ${deathsBy.bomb}`);
+        if (deathsBy.goomba)rows.push(`👹 goombas (yes, really): ${deathsBy.goomba}`);
+        if (deathsBy.other) rows.push(`❓ classified: ${deathsBy.other}`);
+        rows.forEach((r, i) => ctx.fillText(r, W/2, y0 + 30 + i * 26));
+      }
+    }
     ctx.textAlign = 'left';
-    button(W/2 - 150, H/2 + 60, 300, 58, '↻  Continue (Enter)', tryAgain, true);
-    button(W/2 - 150, H/2 + 135, 300, 52, '⌂  Title Screen', quitToTitle);
+    button(W/2 - 150, H/2 + 170, 300, 58, '↻  Continue (Enter)', tryAgain, true);
+    button(W/2 - 150, H/2 + 245, 300, 52, '⌂  Title Screen', quitToTitle);
   }
 
   /* ---- boss defeated: victory screen before the ending ---- */
