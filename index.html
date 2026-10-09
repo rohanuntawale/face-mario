@@ -184,6 +184,19 @@ function tryLoadFace(i) {
 }
 tryLoadFace(0);
 
+/* -------------------- background image -------------------- */
+/* Drop a file named bg.png / bg.jpg next to index.html and the whole
+   game world is drawn over it instead of the plain sky gradient. */
+const BG_FILES = ['bg.png','bg.jpg','bg.webp'];
+const bgImg = new Image();
+let bgImgReady = false;
+(function tryLoadBg(i) {
+  if (i >= BG_FILES.length) return;
+  bgImg.onload = () => { bgImgReady = true; };
+  bgImg.onerror = () => tryLoadBg(i + 1);
+  bgImg.src = BG_FILES[i];
+})(0);
+
 /* Built-in fallback: a little smiley, drawn once to an offscreen canvas */
 const fallbackFace = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 64;
@@ -229,12 +242,46 @@ function levelHelpers(g) {
     },
   };
 }
+/* seeded RNG: each run gets one seed so pit randomization is stable across
+   deaths/respawns in the same run, but varies between runs */
+let runSeed = (Math.random() * 0xffffffff) >>> 0;
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function randomizePits(g) { // widen/narrow each ground gap by -1..+2 tiles (clamped 2..5)
+  const rnd = mulberry32(runSeed ^ 0x9e3779b9);
+  const blocked = x => { // never move ground under something standing there (pipe, vault, goomba, flag)
+    for (let y = 14; y <= 15; y++) if (g[y][x] !== '.') return true;
+    return false;
+  };
+  let x = 0;
+  while (x < COLS) {
+    if (g[16][x] === 'X') { x++; continue; }
+    const gapStart = x;
+    while (x < COLS && g[16][x] !== 'X') x++;
+    const origWidth = x - gapStart;
+    let width = origWidth + Math.floor(rnd() * 4) - 1; // -1, 0, +1, +2
+    width = Math.max(2, Math.min(5, width));
+    for (let i = gapStart; i < gapStart + Math.max(width, origWidth); i++) {
+      if (i >= COLS || blocked(i)) continue;
+      const solid = i < gapStart + width; // inside the new (possibly shifted) gap?
+      if (solid === (g[16][i] === 'X')) { g[16][i] = solid ? '.' : 'X'; g[17][i] = solid ? '.' : 'X'; }
+    }
+    x = gapStart + Math.max(width, origWidth); // skip past what we just touched — widening clears ground we must not rescan
+  }
+}
 function makeLevel(name, pal, fn, time) {
   return {
     name, pal, time: time || 300,
     build() {
       const g = Array.from({ length: ROWS }, () => Array(COLS).fill('.'));
       fn(levelHelpers(g));
+      randomizePits(g);
       return g.map(r => r.join(''));
     }
   };
@@ -382,7 +429,7 @@ function curPal() { return LEVELS[currentLevel].pal; }
 /* ----------------------- entities ------------------------ */
 const player = { x: 80, y: 0, w: 28, h: 36, vx: 0, vy: 0, onGround: false, face: 1, squash: 1, dead: false, deadT: 0, power: 0, invuln: 0, droppedPower: false };
 const GRAV = 2200, MOVE_ACC = 2600, RUN_MAX = 380, WALK_MAX = 210, FRICTION = 1900, AIR_ACC = 1800;
-const JUMP_V = -760, JUMP_CUT = 0.45, COYOTE = 0.09, JUMP_BUF = 0.12;
+const JUMP_V = -820, JUMP_CUT = 0.45, COYOTE = 0.12, JUMP_BUF = 0.15;
 let coyote = 0, jumpBuf = 0, jumpHeld = false;
 let fireHeld = false, fireCd = 0;
 
@@ -643,11 +690,13 @@ function gotoIntro() {          // (re)start current level with banner
 
 function startGame() {          // from title: fresh run
   currentLevel = 0; score = 0; lives = 3;
+  runSeed = (Math.random() * 0xffffffff) >>> 0; // fresh pit layout for this run
   player.power = 0; player.droppedPower = false;
   gotoIntro();
 }
 function tryAgain() {           // from game over: keep the level, fresh lives
   lives = 3; score = 0;
+  runSeed = (Math.random() * 0xffffffff) >>> 0;
   player.power = 0; player.droppedPower = false;
   gotoIntro();
 }
@@ -1184,11 +1233,18 @@ function draw() {
   const pal = curPal();
 
   /* sky */
-  const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, pal.skyTop); sky.addColorStop(1, pal.skyBot);
-  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  if (bgImgReady) { // custom background image (parallax), falls back to the gradient
+    const iw = bgImg.width, ih = bgImg.height;
+    const scale = H / ih, dw = iw * scale;
+    const off = ((camX * 0.15) % dw + dw) % dw; // gentle parallax as the camera moves
+    for (let dx = -off; dx < W; dx += dw) ctx.drawImage(bgImg, Math.round(dx), 0, dw, H);
+  } else {
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, pal.skyTop); sky.addColorStop(1, pal.skyBot);
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+  }
 
-  if (pal.stars) {
+  if (pal.stars && !bgImgReady) {  // no stars/moon over a custom photo background
     ctx.fillStyle = '#fff';
     for (let i = 0; i < 70; i++) {
       const sx = (i * 137.5) % W, sy = (i * 89.7) % (H * 0.75);
@@ -1201,7 +1257,7 @@ function draw() {
     ctx.fillStyle = '#f4f0d8'; ctx.beginPath(); ctx.arc(W - 130, 90, 34, 0, Math.PI * 2); ctx.fill();
     ctx.fillStyle = pal.skyTop; ctx.beginPath(); ctx.arc(W - 118, 80, 30, 0, Math.PI * 2); ctx.fill();
   }
-  if (pal.clouds) {
+  if (pal.clouds && !bgImgReady) { // no drawn clouds over a custom photo background
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
     for (let i = 0; i < 8; i++) {
       const cx = ((i*397 + 60) - camX*0.3) % (W+300) - 150;
@@ -1209,7 +1265,7 @@ function draw() {
       cloud(cx, cy, 1 + (i%3)*0.4);
     }
   }
-  if (pal.hill) {
+  if (pal.hill && !bgImgReady) {   // no drawn hills over a custom photo background
     ctx.fillStyle = pal.hill;
     for (let i = 0; i < 6; i++) {
       const hx = ((i*613 + 120) - camX*0.5) % (W+500) - 200;
