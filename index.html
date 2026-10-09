@@ -1505,9 +1505,11 @@ function drawTitle() {
   const pal = PAL_HILLS;
   const t = performance.now() / 1000;
 
-  // decorative ground + hills
-  ctx.fillStyle = pal.hill;
-  for (let i = 0; i < 5; i++) hill(i * 260 - 80, H - 60, 110 + (i % 2) * 60);
+  // decorative ground (hills skipped over a custom photo background)
+  if (!bgImgReady) {
+    ctx.fillStyle = pal.hill;
+    for (let i = 0; i < 5; i++) hill(i * 260 - 80, H - 60, 110 + (i % 2) * 60);
+  }
   for (let x = 0; x < W; x += TILE) ground(x, H - 40, pal);
 
   // bouncing face
